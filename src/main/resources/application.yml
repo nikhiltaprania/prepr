@@ -1,0 +1,128 @@
+spring:
+  application:
+    name: spring-rag
+
+  # AI inference — Spring AI OpenAI client pointed at a local LM Studio server.
+  # Chat + embeddings are served by LM Studio's OpenAI-compatible API.
+  # All connection details are env-overridable so the same build runs against LM Studio
+  # locally and a managed OpenAI-compatible endpoint in production (no code/secrets baked in).
+  ai:
+    openai:
+      base-url: ${AI_BASE_URL:http://127.0.0.1:1234/v1}
+      api-key: ${AI_API_KEY:lm-studio}
+      chat:
+        # Default temperature suits conversational turns (interviewer/chat). Deterministic
+        # tasks (evaluation, report, rerank) override this per-call via ChatOptions.
+        model: ${AI_CHAT_MODEL:google/gemma-4-e4b}
+        temperature: 0.7
+      embedding:
+        model: ${AI_EMBEDDING_MODEL:text-embedding-nomic-embed-text-v2-moe}
+    vectorstore:
+      pgvector:
+        initialize-schema: true
+        dimensions: 768
+    # Framework-native resilience for model/embedding calls (no custom @Retryable needed).
+    # Bounded retries with exponential backoff smooth over transient inference hiccups.
+    retry:
+      max-attempts: 2
+      backoff:
+        initial-interval: 1s
+        multiplier: 2
+        max-interval: 10s
+      on-client-errors: false   # don't retry 4xx (bad request); only transient/5xx/IO failures
+
+  # HTTP client timeouts for the autoconfigured RestClient used by Spring AI. Fail fast instead of
+  # hanging a request thread forever when the inference endpoint stalls. read-timeout is generous
+  # because local LLM inference is slow; tune down for a fast hosted endpoint.
+  http:
+    client:
+      connect-timeout: 10s
+      read-timeout: 120s
+
+  # Persistence — PostgreSQL (with pgvector) via JPA/Hibernate.
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5433/ragdb}
+    driver-class-name: org.postgresql.Driver
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:root}
+  jpa:
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+    hibernate:
+      # dev convenience. For prod set DDL_AUTO=validate and manage schema with Flyway/Liquibase
+      # (generate the baseline from the dev schema once a live DB is available).
+      ddl-auto: ${DDL_AUTO:update}
+    open-in-view: false          # no lazy loading in the web layer; services map to DTOs explicitly
+    show-sql: false
+    properties:
+      hibernate:
+        order_inserts: true
+        jdbc:
+          batch_size: 50         # batch document chunk inserts during ingestion
+
+  # Short-term conversation memory cache — Redis.
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+
+  # Social login (OAuth2 Client). Dummy credentials so the app starts; replace via env vars
+  # (GOOGLE_CLIENT_ID/SECRET, GITHUB_CLIENT_ID/SECRET) to enable real Google/GitHub login —
+  # no code change required. Google/GitHub providers are built into Spring Security.
+  # Callback URLs to register with the providers:
+  #   Google: {baseUrl}/login/oauth2/code/google
+  #   GitHub: {baseUrl}/login/oauth2/code/github
+  security:
+    oauth2:
+      client:
+        registration:
+          google:
+            client-id: ${GOOGLE_CLIENT_ID:dummy-google-client-id}
+            client-secret: ${GOOGLE_CLIENT_SECRET:dummy-google-client-secret}
+            scope: openid, profile, email
+          github:
+            client-id: ${GITHUB_CLIENT_ID:dummy-github-client-id}
+            client-secret: ${GITHUB_CLIENT_SECRET:dummy-github-client-secret}
+            scope: read:user, user:email
+
+  # File uploads — resume and knowledge-base document ingestion.
+  servlet:
+    multipart:
+      max-file-size: 25MB
+      max-request-size: 25MB
+
+# Admin onboarding: set ADMIN_EMAIL + ADMIN_PASSWORD to provision an administrator at startup,
+# then log in with those credentials. Left empty = no admin is created (secure default).
+app:
+  bootstrap-admin:
+    email: ${ADMIN_EMAIL:admin@gmail.com}
+    password: ${ADMIN_PASSWORD:admin}
+    username: ${ADMIN_USERNAME:Administrator}
+
+# RAG tunables. rerank-enabled toggles the LLM retrieve-then-rerank step on /api/ask
+# (set false to compare against plain vector ranking). Memory tunables under rag.memory.*.
+rag:
+  rerank-enabled: true
+  memory:
+    max-messages: 20
+    ttl: 7d
+    summary-threshold: 4
+    semantic-top-k: 5
+    duplicate-threshold: 0.95
+
+# Observability — Actuator. Health aggregates PostgreSQL, Redis and LM Studio
+# (custom indicator); metrics expose JVM/HTTP stats.
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, metrics
+  endpoint:
+    health:
+      show-details: always
+      show-components: always
+
+logging:
+  level:
+    # Production default. Raise to DEBUG per-package (e.g. com.springrag.retrieval) only while
+    # diagnosing retrieval/ingestion; DEBUG emits per-chunk/per-message traces and is hot-path noise.
+    com.springrag: ${LOG_LEVEL:info}

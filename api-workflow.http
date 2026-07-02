@@ -1,0 +1,416 @@
+###############################################################################
+# spring-rag — Complete End-to-End API Workflow
+#
+# Format: IntelliJ HTTP Client (.http). Each request runs top-to-bottom; IDs from
+# earlier responses are captured into global variables with `> {% ... %}` response
+# handlers and reused as {{var}} in later requests, so ORDER MATTERS.
+#
+# Run a single request via the green ▶ gutter icon, or "Run all requests in file".
+#
+# ---------------------------------------------------------------------------------
+# PORTING TO POSTMAN / BRUNO:
+#   - Replace `> {% client.global.set("x", response.body.f) %}` with a post-response
+#     script: Postman `pm.collectionVariables.set("x", pm.response.json().f)` /
+#     Bruno  `bru.setVar("x", res.body.f)`.
+#   - Keep the same request order and the same {{var}} references.
+#
+# PREREQUISITES (all running before you start):
+#   - App:        ./mvnw spring-boot:run            (port 8080)
+#   - PostgreSQL+pgvector: localhost:5433  db=ragdb
+#   - Redis:      localhost:6379
+#   - LM Studio:  http://127.0.0.1:1234/v1  with BOTH a chat model AND an embedding
+#                 model loaded. Every AI step (search, ask, chat, interview Q/A,
+#                 report, voice, resume, coaching) needs these.
+#
+# ID FLOW (captured -> reused):
+#   userId          -> conversations, interviews, resumes, skills, coaching, memory stats
+#   knowledgeBaseId -> documents, search, ask, chat
+#   documentId      -> document get/chunks/delete
+#   conversationId  -> chat, ask, messages, context, summary, memory cache
+#   interviewId     -> questions, answers, report, voice
+#   questionId      -> answer submission
+#   voiceInterviewId-> voice conversation channel
+###############################################################################
+
+@baseUrl = http://localhost:8080
+
+
+###############################################################################
+# 1) USER  (the candidate identity + coaching profile — the root of everything)
+###############################################################################
+
+### 1.1 Create a user (identity + profile). Captures {{userId}}.
+POST {{baseUrl}}/api/users
+Content-Type: application/json
+
+{
+  "username": "nikk",
+  "email": "nikk@example.com",
+  "targetRole": "Java Backend Engineer",
+  "experienceYears": 3,
+  "currentCompany": "Acme",
+  "targetCompany": "BigTech",
+  "bio": "Backend engineer focused on Spring and distributed systems."
+}
+
+> {%
+    client.global.set("userId", response.body.id);
+%}
+
+### 1.2 Get the user by id
+GET {{baseUrl}}/api/users/{{userId}}
+
+### 1.3 List all users
+GET {{baseUrl}}/api/users
+
+### 1.4 Update the user / profile
+PUT {{baseUrl}}/api/users/{{userId}}
+Content-Type: application/json
+
+{
+  "username": "nikk",
+  "email": "nikk@example.com",
+  "targetRole": "Senior Java Backend Engineer",
+  "experienceYears": 4,
+  "currentCompany": "Acme",
+  "targetCompany": "BigTech",
+  "bio": "Backend engineer; Spring, PostgreSQL, microservices."
+}
+
+### 1.5 (Negative) Invalid email -> 400 ApiError (validation)
+POST {{baseUrl}}/api/users
+Content-Type: application/json
+
+{ "username": "bad", "email": "not-an-email" }
+
+
+###############################################################################
+# 2) KNOWLEDGE BASE + DOCUMENT INGESTION  (RAG corpus)
+###############################################################################
+
+### 2.1 Create a knowledge base. Captures {{knowledgeBaseId}}.
+POST {{baseUrl}}/api/knowledge-bases
+Content-Type: application/json
+
+{
+  "name": "Java Interview KB",
+  "description": "Reference material for interview prep"
+}
+
+> {%
+    client.global.set("knowledgeBaseId", response.body.id);
+%}
+
+### 2.2 Get the knowledge base
+GET {{baseUrl}}/api/knowledge-bases/{{knowledgeBaseId}}
+
+### 2.3 List knowledge bases
+GET {{baseUrl}}/api/knowledge-bases
+
+### 2.4 KB statistics (before upload -> counts 0)
+GET {{baseUrl}}/api/knowledge-bases/{{knowledgeBaseId}}/statistics
+
+### 2.5 Upload a document (multipart "file"; kb id is a query param). Captures {{documentId}}.
+# Pipeline: Tika parse -> TokenTextSplitter (300-token chunks) -> JPA chunks + pgvector embeddings.
+POST {{baseUrl}}/api/documents/upload?knowledgeBaseId={{knowledgeBaseId}}
+Content-Type: multipart/form-data; boundary=KbBoundary
+
+--KbBoundary
+Content-Disposition: form-data; name="file"; filename="java-notes.txt"
+Content-Type: text/plain
+
+String is immutable, so every modification creates a new object. StringBuilder is
+mutable and modifies the same object, so it is preferred when concatenating strings
+in a loop. ArrayList is backed by a dynamic array giving O(1) random access but O(n)
+insertion/deletion at arbitrary indices; LinkedList is a doubly linked list giving
+O(1) insertion/deletion once positioned but O(n) random access. Dependency injection
+lets the Spring container provide collaborators, improving testability and decoupling.
+--KbBoundary--
+
+> {%
+    client.global.set("documentId", response.body.documentId);
+%}
+
+### 2.6 List documents in the KB
+GET {{baseUrl}}/api/documents/knowledge-base/{{knowledgeBaseId}}
+
+### 2.7 Get the document
+GET {{baseUrl}}/api/documents/{{documentId}}
+
+### 2.8 Get the document's chunks
+GET {{baseUrl}}/api/documents/{{documentId}}/chunks
+
+### 2.9 KB statistics (after upload -> counts > 0)
+GET {{baseUrl}}/api/knowledge-bases/{{knowledgeBaseId}}/statistics
+
+
+###############################################################################
+# 3) RETRIEVAL  (raw vector search = debug; grounded answer = user-facing)
+###############################################################################
+
+### 3.1 Semantic search — raw chunks + scores (debug view)
+POST {{baseUrl}}/api/search
+Content-Type: application/json
+
+{
+  "knowledgeBaseId": "{{knowledgeBaseId}}",
+  "query": "What is the difference between String and StringBuilder?"
+}
+
+### 3.2 Grounded answer (stateless) — synthesized from retrieved chunks only
+POST {{baseUrl}}/api/ask
+Content-Type: application/json
+
+{
+  "knowledgeBaseId": "{{knowledgeBaseId}}",
+  "question": "When should I use StringBuilder instead of String?"
+}
+
+
+###############################################################################
+# 4) CONVERSATION + CHAT  (RAG + memory + citations)
+###############################################################################
+
+### 4.1 Create a conversation. Captures {{conversationId}}.
+POST {{baseUrl}}/api/conversations
+Content-Type: application/json
+
+{
+  "userId": "{{userId}}",
+  "title": "Interview prep chat"
+}
+
+> {%
+    client.global.set("conversationId", response.body.conversationId);
+%}
+
+### 4.2 Chat turn 1 (states a name + preference to exercise memory extraction)
+POST {{baseUrl}}/api/chat
+Content-Type: application/json
+
+{
+  "conversationId": "{{conversationId}}",
+  "knowledgeBaseId": "{{knowledgeBaseId}}",
+  "message": "My name is Nikk and I prefer concise bullet points. Explain ArrayList vs LinkedList."
+}
+
+### 4.3 Chat turn 2 (relies on prior context)
+POST {{baseUrl}}/api/chat
+Content-Type: application/json
+
+{
+  "conversationId": "{{conversationId}}",
+  "knowledgeBaseId": "{{knowledgeBaseId}}",
+  "message": "Which one is better for frequent insertions at arbitrary indices?"
+}
+
+### 4.4 Grounded answer WITH memory (follow-up resolves against conversation)
+POST {{baseUrl}}/api/ask
+Content-Type: application/json
+
+{
+  "conversationId": "{{conversationId}}",
+  "knowledgeBaseId": "{{knowledgeBaseId}}",
+  "question": "Can you explain that further?"
+}
+
+### 4.5 Persisted messages (source of truth)
+GET {{baseUrl}}/api/conversations/{{conversationId}}/messages
+
+### 4.6 Assembled context (summary + recent messages + source)
+GET {{baseUrl}}/api/conversations/{{conversationId}}/context
+
+### 4.7 Conversation summary
+GET {{baseUrl}}/api/conversations/{{conversationId}}/summary
+
+### 4.8 Force summary regeneration
+POST {{baseUrl}}/api/conversations/{{conversationId}}/summary/regenerate
+
+### 4.9 Short-term Redis message cache
+GET {{baseUrl}}/api/memory/{{conversationId}}
+
+### 4.10 Semantic (long-term) memory statistics for the user
+GET {{baseUrl}}/api/memories/statistics/{{userId}}
+
+### 4.11 Clear the short-term cache (rebuilds from PostgreSQL on next turn)
+DELETE {{baseUrl}}/api/memory/{{conversationId}}
+
+
+###############################################################################
+# 5) INTERVIEW — STRUCTURED (scripted: planned questions asked in order)
+###############################################################################
+
+### 5.1 Create a scripted interview (adaptive=false). Captures {{interviewId}}.
+# type: JAVA_BACKEND | SPRING_BOOT | MICROSERVICES | SYSTEM_DESIGN | BEHAVIORAL | HR | CUSTOM
+# difficulty: BEGINNER | INTERMEDIATE | ADVANCED
+POST {{baseUrl}}/api/interviews
+Content-Type: application/json
+
+{
+  "userId": "{{userId}}",
+  "type": "JAVA_BACKEND",
+  "difficulty": "INTERMEDIATE",
+  "adaptive": false
+}
+
+> {%
+    client.global.set("interviewId", response.body.id);
+%}
+
+### 5.2 Start the interview
+POST {{baseUrl}}/api/interviews/{{interviewId}}/start
+
+### 5.3 Get the interview
+GET {{baseUrl}}/api/interviews/{{interviewId}}
+
+### 5.4 List the user's interviews
+GET {{baseUrl}}/api/interviews/user/{{userId}}
+
+### 5.5 Add a manual question to the plan (sequenceNumber optional; omit to auto-append)
+POST {{baseUrl}}/api/interview-questions
+Content-Type: application/json
+
+{
+  "interviewId": "{{interviewId}}",
+  "sequenceNumber": 1,
+  "question": "What is the difference between String and StringBuilder in Java?"
+}
+
+### 5.6 Generate an AI plan of 2 more questions (appended in order, not yet asked)
+POST {{baseUrl}}/api/interview-questions/plan/{{interviewId}}?count=2
+
+### 5.7 List the planned questions (in sequence order)
+GET {{baseUrl}}/api/interview-questions/interview/{{interviewId}}
+
+### 5.8 Ask the NEXT question in order (marks it asked). Captures {{questionId}}.
+# Repeat 5.8 -> 5.9 for each question. When the plan is exhausted the response has
+# "completed": true and no id (scripted interview is finished).
+POST {{baseUrl}}/api/interview-questions/next/{{interviewId}}
+
+> {%
+    client.global.set("questionId", response.body.id);
+%}
+
+### 5.9 Submit the answer for the current question (auto-evaluated by the LLM)
+POST {{baseUrl}}/api/interview-answers
+Content-Type: application/json
+
+{
+  "questionId": "{{questionId}}",
+  "answer": "String is immutable so each change makes a new object; StringBuilder is mutable, so use it for loop concatenation to avoid garbage and improve performance."
+}
+
+### 5.10 Ask the next question again (Q2). Captures {{questionId}}.
+POST {{baseUrl}}/api/interview-questions/next/{{interviewId}}
+
+> {%
+    client.global.set("questionId", response.body.id);
+%}
+
+### 5.11 Answer Q2
+POST {{baseUrl}}/api/interview-answers
+Content-Type: application/json
+
+{
+  "questionId": "{{questionId}}",
+  "answer": "ArrayList gives O(1) random access; LinkedList gives O(1) insert/delete once positioned. For frequent arbitrary insertions/deletions LinkedList avoids element shifting."
+}
+
+### 5.12 List all answers for the interview (with scores + rubric feedback)
+GET {{baseUrl}}/api/interview-answers/interview/{{interviewId}}
+
+### 5.13 Generate the interview report (aggregates Q&A; sets overallScore + completes)
+POST {{baseUrl}}/api/interview-reports/generate/{{interviewId}}
+
+### 5.14 Get the interview report
+GET {{baseUrl}}/api/interview-reports/interview/{{interviewId}}
+
+
+###############################################################################
+# 6) INTERVIEW — VOICE/CONVERSATIONAL CHANNEL
+#    Same interview engine, driven as a natural dialogue. Use an ADAPTIVE
+#    interview so the AI can greet, ask for an intro, and generate questions.
+###############################################################################
+
+### 6.1 Create an adaptive interview for the voice channel. Captures {{voiceInterviewId}}.
+POST {{baseUrl}}/api/interviews
+Content-Type: application/json
+
+{
+  "userId": "{{userId}}",
+  "type": "JAVA_BACKEND",
+  "difficulty": "INTERMEDIATE",
+  "adaptive": true
+}
+
+> {%
+    client.global.set("voiceInterviewId", response.body.id);
+%}
+
+### 6.2 Start the conversation (empty text -> greeting + request for self-introduction)
+POST {{baseUrl}}/api/voice/interviews/{{voiceInterviewId}}/respond
+Content-Type: application/json
+
+{ "text": "" }
+
+### 6.3 Candidate self-introduction (AI acknowledges, transitions to first question)
+POST {{baseUrl}}/api/voice/interviews/{{voiceInterviewId}}/respond
+Content-Type: application/json
+
+{ "text": "Hi, I'm Nikk, a backend engineer with three years of Spring experience." }
+
+### 6.4 Answer the question the AI just asked (it records/evaluates, then asks the next)
+POST {{baseUrl}}/api/voice/interviews/{{voiceInterviewId}}/respond
+Content-Type: application/json
+
+{ "text": "I'd use constructor injection for required dependencies because it makes them explicit and the bean immutable." }
+
+### 6.5 Transcript of the voice interview (derived from the conversation messages)
+GET {{baseUrl}}/api/voice/interviews/{{voiceInterviewId}}/transcript
+
+
+###############################################################################
+# 7) RESUME / SKILLS / COACHING  (all use {{userId}})
+###############################################################################
+
+### 7.1 Upload + analyze a resume (multipart "file"). Tika parse -> AI structured analysis.
+POST {{baseUrl}}/api/resumes/users/{{userId}}
+Content-Type: multipart/form-data; boundary=ResumeBoundary
+
+--ResumeBoundary
+Content-Disposition: form-data; name="file"; filename="resume.txt"
+Content-Type: text/plain
+
+Nikk — Java Backend Engineer (3 years).
+Skills: Java, Spring Boot, Spring Data JPA, PostgreSQL, Redis, Docker, microservices.
+Experience: Built REST APIs and event-driven services at Acme; tuned PostgreSQL queries.
+Projects: Migrated a monolith to microservices; added Redis caching (40% latency drop).
+Education: B.Tech in Computer Science.
+--ResumeBoundary--
+
+### 7.2 Get the latest resume analysis for the user
+GET {{baseUrl}}/api/resumes/users/{{userId}}
+
+### 7.3 Get the user's skill scores
+# NOTE: skill aggregation (SkillTrackingService.updateSkills) is not currently wired
+# to any endpoint or trigger, so this returns [] until that is invoked. Listed here
+# for completeness of the skill module surface.
+GET {{baseUrl}}/api/user-skills/user/{{userId}}
+
+### 7.4 Generate a personalized coaching plan (from profile + skills via the LLM)
+GET {{baseUrl}}/api/coaching/users/{{userId}}/plan
+
+
+###############################################################################
+# 8) CLEANUP  (reverse dependency order)
+###############################################################################
+
+### 8.1 Delete the document (cascades chunks + removes pgvector embeddings)
+DELETE {{baseUrl}}/api/documents/{{documentId}}
+
+### 8.2 Delete the knowledge base (cascades documents/chunks + KB embeddings)
+DELETE {{baseUrl}}/api/knowledge-bases/{{knowledgeBaseId}}
+
+### 8.3 Delete the user
+DELETE {{baseUrl}}/api/users/{{userId}}
+###############################################################################
