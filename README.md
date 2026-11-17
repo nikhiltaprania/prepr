@@ -11,6 +11,18 @@ resume analysis, and a knowledge-base assistant with Retrieval-Augmented Generat
 
 ---
 
+## Key Features
+
+- **Adaptive AI interviewer** — runs a conversational mock interview, asks context-aware follow-ups and decides when to move to the next question. Optional voice mode uses the browser Web Speech API.
+- **Answer evaluation and reports** — answers are scored asynchronously against a rubric (technical accuracy, completeness, practical understanding, communication clarity); finishing an interview triggers a report with strengths, weaknesses, recommendations and an overall score.
+- **Coaching plans and skill tracking** — plans derived from interview history, plus long-term skill progression per user.
+- **Resume analysis** — upload a resume and get an AI analysis.
+- **RAG knowledge assistant** — upload documents, then ask questions with metadata-filtered vector search over PGVector, optional LLM re-ranking and source citations.
+- **Conversation memory** — recent turns cached in Redis, periodic summaries, and long-term semantic memory stored in PGVector.
+- **Security** — stateless JWT authentication, Google/GitHub OAuth2 login, role-based access control and ownership checks.
+
+---
+
 ## Table of Contents
 1. [Architecture](#architecture)
 2. [Modules](#modules)
